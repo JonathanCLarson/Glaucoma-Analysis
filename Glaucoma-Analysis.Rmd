@@ -1,0 +1,163 @@
+---
+title: "Glaucoma Analysis"
+author: "Jonathan Larson"
+output:
+  html_document:
+    df_print: paged
+editor_options:
+  chunk_output_type: console
+---
+
+
+### Introduction
+
+Prevalent treatments for age-related macular degeneration are suspected to increase patients' probability of developing glaucoma. These treatments, anti-vascular endothelial growth factor (VEGF) injections, have increased in popularity over the last decade, so identifying such adverse effects is particularly relevant. 
+
+Data collected from patients at the Wheaton Eye Clinic is analyzed to investigate a link between repeated VEGF treatments and a patient's likelihood of developing glaucoma.
+
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = T, warning = F, message = F)
+library("tidyverse")
+library("rstan") # observe startup messages
+library("shinystan")
+library("bayesplot")
+library("matrixStats")
+library("gridExtra")
+library("mosaic")
+options(mc.cores = parallel::detectCores()) #want to run the chains in parallel
+rstan_options(auto_write = TRUE) #write a complied version to the disk 
+```
+
+
+```{r}
+data <- read.csv(file = "vegf.csv")
+data <- mutate(data,diseaseNum = as.numeric(factor(disease))-1,sexNum = as.numeric(factor(sex))-1)
+# Female= 0, Male= 1; Diseased: No = 0,Yes = 1
+
+```
+
+### EDA
+
+Comparing whether patients developed glaucoma with the number of VEGF injections received shows that the distribution of injections for patients who developed glaucoma lies almost entirely above the median number of injections for patients who did not develop the disease. However, the tail for patients who did not develop glaucoma extends to include the entire distribution of patients who did. Figure 2 shows that there were fewer male patients than females, yet the proportion of males who developed glaucoma seems higher for men than women. Figure 3 again shows that most patients received 10 or fewer injections, and that the patients who developed glaucoma had more injections than the large concentration of patients who received less than 5 injections. Figure 4 shows that males and females are similarly distributed for when they received their first injection and the total number of injections received. However, males do seem to be more evenly distributed than women with less of a concentration in the region with high age at first injection and few total injections.
+
+```{r}
+grid.arrange(grobs = list(
+ggplot(data = data)+
+  geom_boxplot(mapping = aes(x=disease,y=totalinj))+ggtitle("Figure 1")+xlab("Glaucoma")+ylab("Total Injections"), # Main Plot!
+ggplot(data=data)+
+  geom_bar(mapping = aes(x=disease))+facet_wrap(data$sex)+ggtitle("Figure 2") + xlab("Developed Glaucoma"),
+ggplot(data=data)+
+  geom_jitter(mapping=aes(x=ageatfirstinj,y=totalinj,color=disease))+ggtitle("Figure 3") + xlab("Age at First Injection") + ylab("Total Injections"),
+ggplot(data=data)+
+  geom_jitter(mapping=aes(x=ageatfirstinj,y=totalinj,color=sex))+ggtitle("Figure 4") + xlab("Age at First Injection") + ylab("Total Injections")))
+
+```
+
+
+### Model Description
+
+In order to understand how VEGF treatment may influence the develop of glaucoma, patient data are analzed to compare glaucoma with their sex, the total number of injections, and the age at which they received their first injection.
+The relationship between glaucoma and the available variables is modeled as 
+$y_i \sim Ber(\mu _i)$ where 
+$\mu_i\sim logistic(\beta_0+\beta_1x_1 +\beta_2 x_2+\beta_3x_3)$. In this logistic distribution, $x_1$ is the sex of the patient, $x_2$ is the total number of injections, and $x_3$ is the patient's age when they had their first injection. 
+The parameter $\beta_0$ relates to the baseline probability that a female who did not receive any injections will develop glaucoma. It is given a prior distribution of $\beta_0\sim N(0,10)$. The other parameters $\beta_{1,2,3}$ describe the effects of variables $x_{1,2,3}$ respectively and are also given distributions of $\beta_{1,2,3} \sim N(0,10)$. 
+
+
+### Prior Predictive Checks
+
+Our prior predictive checks confirm that our model is able to effectively account for all possible results. The figure below shows that this prior model mostly generates scenarios where either all patients developed glaucoma or none did. This is reasonable because only a small range of combinations of $\beta$ parameters will give odds close to 0, which correspond to probabilities close to 0.5. 
+
+```{r}
+
+disease.data <- list(N = nrow(data), y = data$diseaseNum, x1 = data$sexNum,x2=data$totalinj, x3=data$ageatfirstinj)
+
+fit.priorck <- stan(file = 'GlaucomaPrior.stan', data = disease.data, seed = 13)
+save(fit.priorck,file="prior.Rdata")
+load("prior.Rdata")
+yfake <- as.data.frame(fit.priorck) %>% select(contains("y_fake"))
+# ppc_bars(y = data$diseaseNum, yrep = as.matrix(yfake))
+ppc_stat_grouped(y = data$diseaseNum, yrep = as.matrix(yfake),group = data$sex)
+
+```
+
+
+
+### Hierarchical Modeling
+
+This model does not use shrinkage because it does not assume that any relationship exists between the distributions for $\beta$ parameters. 
+
+```{r}
+
+fit <- stan(file = 'Glaucoma.stan', data = disease.data, seed = 13)
+save(fit,file = "fit.Rdata")
+load("fit.Rdata")
+# launch_shinystan(as.shinystan(fit))
+
+```
+
+
+
+### Model Diagnostics
+
+Running the stan analysis of the data reports no divergent chains. Further investigation shows that all $\hat{R}$ values are below 1.1 and that the Markov chains effectively mixed during sampling while achieving $n_{eff}$ values above 1,000. This allows us to conclude that the chains sufficiently covered the sample space while reaching a single mode.
+
+### Posterior Predictive Checks
+
+
+```{r}
+load("fit.Rdata")
+yrep.subset <- as.data.frame(fit) %>% select(contains("y_rep"))
+
+ppc_bars(y = data$diseaseNum, yrep = as.matrix(yrep.subset))
+ppc_stat_grouped(y = data$diseaseNum, yrep = as.matrix(yrep.subset),group = data$sex)
+```
+
+
+### Conclusions
+
+Parameter credible intervals and means are calculated in the following table. 
+
+|        | 2.5%         | Mean         | 97.5%
+-------  | ------------ | -----------  | -----------
+$\beta_0$| -5.335       | -1.526       | 1.947    
+$\beta_1$| 0.206        | 1.005        | 1.833
+$\beta_2$| 0.022        | 0.061        | 0.097
+$\beta_3$| -0.081       |  -0.036      | 0.009
+
+These results indicate that both a patient's sex and the number of VEGF injections they have received affect their likelihood of developing glaucoma. Females have lower log odds of developing glaucoma by a difference of 1.005, while each additional injection increases a patient's log odds by 0.061. However, the 95% credible interval for $\beta_3$ includes 
+
+Below is a log-odds table for total injections and sex for a patient who received their first injection at 80 years old, which is the average age for this data. These odds show that females who only received 5 injections had the lowest odds of developing glaucoma at -4.101, while males who received 20 injections had the heighes at -2.181. Both values are less than 0, indicating that the predicted probability of developing glaucoma is still below 0.5, but the less negative odds indicate a higher predicted probability. 
+
+|       | 5 Injections | 10 injections| 15 injections | 20 injections
+------- | ------------ | ------------ | ------------- | --------------
+Female  | -4.101       | -3.796       | -3.491        | -3.186
+Male    | -3.096       | -2.791       | -2.486        | -2.181
+
+To check the relationship between age at first injection and total injections with the development of glaucoma, the following table presents the log odds based on these variables for female patients. Since there is no interaction between sex and the other variables, a table for males will follow the same patterns.
+
+
+|       | 5 Injections | 10 injections| 15 injections | 20 injections
+------- | ------------ | ------------ | ------------- | --------------
+70      | -3.741       | -3.436       | -3.131        | -2.826
+80      | -4.101       | -3.796       | -3.491        | -3.186
+90      | -4.461       | -4.156       | -3.851        | -3.546
+ 
+The following plot of predicted probability as a function of total injections shows how additional injections increase the predicted probability of developing glaucoma, and how males have a higher probability than females. Once again, the patients' age at first injection is held constant at 80 years old.
+
+
+```{r}
+beta0 = -1.526
+beta1 = 1.005
+beta2 = 0.061
+beta3 = -0.036
+age = 80
+injections = 1:50
+Sex = list("Male","Female")
+ggplot()+
+  geom_line(mapping = aes(x=injections,y=1/(1+exp(-(beta0+beta1+beta2*injections + beta3*age))),color = Sex[[1]]))+
+  geom_line(mapping = aes(x=injections,y=1/(1+exp(-(beta0+beta2*injections + beta3*age))),color = Sex[[2]])) +xlab("Injections")+ylab("P(Disease)")+ylim(0,1) + ggtitle("Predicted Probability")
+              
+```
+
+These odds tables, predicted probability charts, and credible intervals each indicate that each additional VEGF injection increases a patient's likelihood of developing glaucoma. 
